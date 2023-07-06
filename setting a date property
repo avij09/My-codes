@@ -1,0 +1,56 @@
+const hubspot = require('@hubspot/api-client');
+
+exports.main = async (event, callback) => {
+  // instantiate the hubspot client
+  
+  const hubspotClient = new hubspot.Client({
+    accessToken: process.env.YOUR SECRET KEY 			// <-- update this
+  })
+  
+  console.log(event);
+  
+  const ticketId = event.object.objectId;      // <---- Object you want to update
+  const daysToAdd = 31;
+  const today = new Date();
+  
+  console.log(today);
+  
+  let today_plus_30 = today.setDate(today.getDate() + daysToAdd);
+  console.log(today_plus_30);
+  
+  today_plus_30 = new Date(today_plus_30);
+  /*
+  var cancelled_date = `${today_plus_30.getMonth() + 1}-${today_plus_30.getDate()}-${today_plus_30.getFullYear()}`;
+  console.log(cancelled_date);
+  */
+  var date_cancelled = new Date (today_plus_30);
+  date_cancelled.setHours(0,0,0,0);
+  console.log(date_cancelled);
+  /*
+  var cancelled_date = cancelled_date.format('MM-DD-YYYY');
+  console.log(cancelled_date);
+  */
+  // hubspot api call
+  let path_api = '/crm/v3/objects/tickets/' + ticketId;
+  console.log(path_api);
+  const api_call = await hubspotClient.apiRequest({
+    method: 'PATCH',
+    path: path_api,
+    body: {
+        "properties": {
+          "cancellation_request_date": date_cancelled
+        }     
+    }
+  });
+  
+  
+  console.log(await api_call);
+  
+  
+  
+  callback({
+    outputFields: {
+      "cancellation_date": date_cancelled
+    }
+  });
+}
