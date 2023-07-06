@@ -1,0 +1,50 @@
+// import the hubspot api client
+const hubspot = require('@hubspot/api-client');
+
+// main function starts here
+exports.main = async (event, callback) => {
+  // variables
+  
+  let associated_company_id = event.inputFields['ToObject Property'];
+  console.log(ToObject Property);
+  console.log(process.env.SECRET KEY);
+  
+  
+  const hubspotClient = new hubspot.Client({
+    accessToken: process.env.SECRET KEY
+   });
+ 
+ /*
+ await hubspotClient.crm.FromObject.associationsApi.create(
+   event.object.objectId,
+   'ToObject',
+    ToObject Property,
+  [
+    {
+      "associationCategory": "USER/HUBSPOT Defined",
+      "associatonTypeId": ID of the association type
+    }
+  ]
+ );
+  */
+  const apiCall = await hubspotClient.apiRequest({
+    method: 'PUT',
+    path: '/crm/v4/objects/FromObject/' + event.object.objectId + '/associations/ToObject/' + ToObject Property,
+    body: 
+      [
+      	{
+        "associationCategory": "USER/HUBSPOT Defined",
+        "associationTypeId": ID of the association type
+        }
+      ]
+    
+  });
+  
+  console.log(await apiCall.json());
+  
+  callback({
+    outputFields: {
+      "output": 1
+    }
+  });
+}
