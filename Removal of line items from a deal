@@ -1,0 +1,79 @@
+const hubspot = require('@hubspot/api-client');
+
+exports.main = async (event, callback) => {
+  // pause function -- does nothing for set amount of time
+  function pause(milliseconds) {
+    var dt = new Date();
+    while ((new Date()) - dt <= milliseconds){
+      // do nothing 
+    }
+  }
+  // instantiate the hubspot client
+  
+  const hubspotClient = new hubspot.Client({
+    accessToken: process.env.billing			// <-- update this
+  })
+  
+  console.log(event);
+  
+  const dealID = event.object.objectId;
+  const toObjectType = "line_items";
+  const after = undefined;
+  const limit = 500;
+  
+  console.log(dealID);
+  
+  let lineItemsPath = '/crm/v4/objects/deals/' + event.object.objectId + '/associations/line_items?limit=500';
+  pause(2000);
+  const lineItemsApi = await hubspotClient.apiRequest({
+    method: 'GET',
+    path: lineItemsPath
+  });
+  
+  pause(2000);
+  const lineItemsApiJson = await lineItemsApi.json();
+  console.log(lineItemsApiJson);
+  
+  // Check results length to make sure there are associated line items
+  if ( lineItemsApiJson.results.length > 0 ) {
+    // Loop through line items 
+    for ( let i = 0 ; i < lineItemsApiJson.results.length; i++ ) {
+      let lineItemId = lineItemsApiJson.results[i].toObjectId;
+      console.log(lineItemId);
+      
+      // api call to line item properties
+      
+      let lineitempropertiesPath = '/crm/v3/objects/line_items/' + lineItemId + '?properties=recurringbillingfrequency&archived=false';
+      pause(2000);
+      const lineitemproperties = await hubspotClient.apiRequest({
+        method: 'GET',
+        path: lineitempropertiesPath
+      });
+      
+      pause(2000);
+      const lineitempropertiesJson = await lineitemproperties.json();
+      console.log(lineitempropertiesJson);
+     
+      // if statement to check if recurringbillingfrequency is nul
+      // if yes, delete. Remove associtiation. Or Archive
+      if (lineitempropertiesJson.properties.recurringbillingfrequency == null ||  lineitempropertiesJson.properties.recurringbillingfrequency == '') {
+        console.log("Found a one-time item!");
+        let lineItemRemovalPath = '/crm/v4/objects/deals/' + event.object.objectId + '/associations/line_items/' + lineItemId ; 
+        pause(2000);
+        await hubspotClient.apiRequest({ // const lineItemRemoval =
+          method: 'DELETE',
+          path: lineItemRemovalPath
+        });
+        //await lineItemRemoval;
+        
+        console.log("Woohoo! Removed line item #" + lineitempropertiesJson.id + " from Deal #" + event.object.objectId);
+      }
+     }
+  }
+  
+  callback({
+    outputFields: {
+     "output": 1 
+    }
+  });
+}
