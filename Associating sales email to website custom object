@@ -1,0 +1,250 @@
+const axios = require('axios');
+
+exports.main = async (event, callback) => {
+  try {
+    // Get the access token from environment
+    const accessToken = process.env.PRIVATE_APP_ACCESS_TOKEN;
+    
+    if (!accessToken) {
+      return callback({
+        outputFields: {
+          success: false,
+          message: 'No access token found in environment'
+        }
+      });
+    }
+
+    // Get the enrolled company ID from the workflow context
+    const companyId = event.object?.objectId || 
+                     event.inputFields['hs_object_id'] || 
+                     event.inputFields['companyId'] ||
+                     event.inputFields['company_id'] ||
+                     event.enrolledObject?.objectId;
+    
+    console.log('Extracted company ID:', companyId);
+    
+    if (!companyId) {
+      return callback({
+        outputFields: {
+          success: false,
+          message: 'No company ID provided'
+        }
+      });
+    }
+
+    const headers = {
+      'Authorization': `Bearer ${accessToken}`,
+      'Content-Type': 'application/json'
+    };
+
+    // Step 1: Get company with all associations
+    console.log(`Getting company ${companyId} with associations`);
+    
+    const companyUrl = `https://api.hubapi.com/crm/v3/objects/companies/${companyId}?associations=emails,2-43356637`;
+    console.log(`Calling URL: ${companyUrl}`);
+    
+    const companyResponse = await axios.get(companyUrl, { headers });
+    console.log('Company associations:', JSON.stringify(companyResponse.data.associations, null, 2));
+
+    // Check for website associations
+    const websiteAssociations = companyResponse.data.associations?.website?.results || 
+                               companyResponse.data.associations?.['2-43356637']?.results || 
+                               companyResponse.data.associations?.['p43704720_website']?.results || [];
+
+    if (websiteAssociations.length === 0) {
+      return callback({
+        outputFields: {
+          success: false,
+          message: 'Company is not associated with any Website objects',
+          debugInfo: `Available associations: ${Object.keys(companyResponse.data.associations || {}).join(', ')}`
+        }
+      });
+    }
+
+    const websiteId = websiteAssociations[0].id;
+    console.log(`Found website association: ${websiteId}`);
+
+    // Check for email associations
+    const emailAssociations = companyResponse.data.associations?.emails?.results || [];
+
+    if (emailAssociations.length === 0) {
+      return callback({
+        outputFields: {
+          success: false,
+          message: 'No emails found associated with this company',
+          debugInfo: `Available associations: ${Object.keys(companyResponse.data.associations || {}).join(', ')}`
+        }
+      });
+    }
+
+    const emailIds = emailAssociations.map(assoc => assoc.id);
+    console.log(`Found ${emailIds.length} associated emails: ${emailIds.join(', ')}`);
+
+    // Step 2: Get details for these emails
+    console.log('Getting email details...');
+    const emailDetailsUrl = 'https://api.hubapi.com/crm/v3/objects/emails/batch/read';
+    const emailDetailsResponse = await axios.post(emailDetailsUrl, {
+      inputs: emailIds.map(id => ({ id: id })),
+      properties: [
+        'hs_email_subject', 
+        'hs_createdate', 
+        'hs_email_direction', 
+        'hs_email_status', 
+        'hs_email_type',
+        'hs_email_html',
+        'hs_email_text'
+      ]
+    }, { headers });
+
+    console.log(`Retrieved details for ${emailDetailsResponse.data.results.length} emails`);
+
+    // Filter for outbound sales emails and sort by creation date
+    const outboundEmails = emailDetailsResponse.data.results
+      .filter(email => {
+        const direction = email.properties.hs_email_direction;
+        const type = email.properties.hs_email_type;
+        console.log(`Email ${email.id}: direction=${direction}, type=${type}`);
+        // Look for outbound emails that are sales emails
+        return direction === 'OUTBOUND' || direction === 'EMAIL' || type === 'SALES_EMAIL';
+      })
+      .sort((a, b) => {
+        const dateA = new Date(a.properties.hs_createdate);
+        const dateB = new Date(b.properties.hs_createdate);
+        return dateB - dateA; // Most recent first
+      });
+
+    if (outboundEmails.length === 0) {
+      // Show all email directions for debugging
+      const allDirections = emailDetailsResponse.data.results.map(e => 
+        `${e.id}: ${e.properties.hs_email_direction || 'unknown'}`
+      );
+      
+      return callback({
+        outputFields: {
+          success: false,
+          message: 'No outbound sales emails found for this company',
+          debugInfo: `Email directions: ${allDirections.join(', ')}`
+        }
+      });
+    }
+
+    const mostRecentEmail = outboundEmails[0];
+    const emailId = mostRecentEmail.id;
+    console.log(`Found most recent sales email: ${emailId}, subject: ${mostRecentEmail.properties.hs_email_subject}`);
+
+    // Step 3: Associate the email to the website custom object
+    console.log(`Associating email ${emailId} to website ${websiteId}`);
+    
+    // Try multiple association creation methods
+    const associationMethods = [
+      // Method 1: v3 batch create with correct association type ID
+      {
+        url: `https://api.hubapi.com/crm/v3/associations/0-49/2-43356637/batch/create`,
+        payload: {
+          inputs: [
+            {
+              from: { id: emailId },
+              to: { id: websiteId },
+              type: "17" // Using the correct association type ID from your curl response
+            }
+          ]
+        }
+      },
+      // Method 2: v4 batch create
+      {
+        url: `https://api.hubapi.com/crm/v4/associations/0-49/2-43356637/batch/create`,
+        payload: {
+          inputs: [
+            {
+              from: { id: emailId },
+              to: { id: websiteId },
+              types: [
+                {
+                  associationCategory: "HUBSPOT_DEFINED",
+                  associationTypeId: 17 // Using the correct association type ID
+                }
+              ]
+            }
+          ]
+        }
+      },
+      // Method 3: v3 batch create with association name
+      {
+        url: `https://api.hubapi.com/crm/v3/associations/0-49/2-43356637/batch/create`,
+        payload: {
+          inputs: [
+            {
+              from: { id: emailId },
+              to: { id: websiteId },
+              type: "email_to_website" // Using the association name
+            }
+          ]
+        }
+      }
+    ];
+
+    let associationSuccess = false;
+    let lastError = null;
+
+    for (let i = 0; i < associationMethods.length; i++) {
+      const method = associationMethods[i];
+      console.log(`Trying association method ${i + 1}: ${method.url}`);
+      
+      try {
+        if (method.method === 'PUT') {
+          await axios.put(method.url, method.payload, { headers });
+        } else {
+          await axios.post(method.url, method.payload, { headers });
+        }
+        
+        console.log(`Association method ${i + 1} succeeded!`);
+        associationSuccess = true;
+        break;
+        
+      } catch (error) {
+        console.log(`Association method ${i + 1} failed:`, error.response?.data || error.message);
+        lastError = error;
+      }
+    }
+
+    if (!associationSuccess) {
+      return callback({
+        outputFields: {
+          success: false,
+          message: `Failed to create association between email and website`,
+          emailId: emailId,
+          websiteId: websiteId,
+          errorDetails: lastError?.response?.data || lastError?.message || 'Unknown error'
+        }
+      });
+    }
+
+    console.log(`Successfully associated email ${emailId} to website ${websiteId}`);
+
+    return callback({
+      outputFields: {
+        success: true,
+        message: `Successfully associated email to website`,
+        emailId: emailId,
+        websiteId: websiteId,
+        emailSubject: mostRecentEmail.properties.hs_email_subject || 'No subject',
+        emailCreateDate: mostRecentEmail.properties.hs_createdate,
+        emailDirection: mostRecentEmail.properties.hs_email_direction,
+        emailHtmlBody: mostRecentEmail.properties.hs_email_html || 'No HTML body',
+        emailTextBody: mostRecentEmail.properties.hs_email_text || 'No text body'
+      }
+    });
+
+  } catch (error) {
+    console.error('Error in custom coded action:', error);
+    
+    return callback({
+      outputFields: {
+        success: false,
+        message: `Error: ${error.response?.data?.message || error.message}`,
+        statusCode: error.response?.status,
+        errorDetails: JSON.stringify(error.response?.data || error.message || {})
+      }
+    });
+  }
+};
