@@ -1,0 +1,186 @@
+const hubspot = require('@hubspot/api-client');
+
+exports.main = async (event, callback) => {
+  try {
+    // Initialize HubSpot client
+    const hubspotClient = new hubspot.Client({
+      accessToken: process.env.billing_contact
+    });
+
+    // Get the company ID from the enrollment trigger
+    const companyId = event.inputFields['hs_object_id'] || event.object.objectId;
+    
+    if (!companyId) {
+      throw new Error('Company ID not found in event data');
+    }
+
+    console.log(`Processing company ID: ${companyId}`);
+
+    // Get current timestamp in milliseconds
+    const currentTimestamp = Date.now();
+    
+    // Define the billing contact labels to look for
+    const billingLabels = ['Billing Contact', 'Secondary Billing Contact'];
+    
+    let hasBillingContacts = false;
+
+    try {
+      // Use the CRM search API to find contacts associated with this company
+      const searchRequest = {
+        filterGroups: [{
+          filters: [{
+            propertyName: 'associatedcompanyid',
+            operator: 'EQ',
+            value: companyId
+          }]
+        }],
+        properties: ['hs_object_id', 'firstname', 'lastname'],
+        limit: 100
+      };
+
+      console.log('Searching for associated contacts...');
+      const contactsResponse = await hubspotClient.crm.contacts.searchApi.doSearch(searchRequest);
+      
+      console.log(`Found ${contactsResponse.results ? contactsResponse.results.length : 0} contacts`);
+
+      if (contactsResponse.results && contactsResponse.results.length > 0) {
+        // For each contact, check their association labels with this company
+        for (const contact of contactsResponse.results) {
+          try {
+            // Make direct API call to get associations
+            const url = `https://api.hubapi.com/crm/v4/objects/contact/${contact.id}/associations/company`;
+            
+            const associationResponse = await fetch(url, {
+              method: 'GET',
+              headers: {
+                'Authorization': `Bearer ${process.env.HUBSPOT_ACCESS_TOKEN}`,
+                'Content-Type': 'application/json'
+              }
+            });
+
+            if (associationResponse.ok) {
+              const associationData = await associationResponse.json();
+              
+              // Check if any association is with our company and has billing labels
+              if (associationData.results) {
+                for (const assoc of associationData.results) {
+                  if (assoc.toObjectId.toString() === companyId.toString()) {
+                    // Check association types for billing labels
+                    if (assoc.associationTypes) {
+                      for (const type of assoc.associationTypes) {
+                        if (type.label && billingLabels.includes(type.label)) {
+                          console.log(`Found billing contact: ${contact.id} with label: ${type.label}`);
+                          hasBillingContacts = true;
+                          break;
+                        }
+                      }
+                    }
+                  }
+                  if (hasBillingContacts) break;
+                }
+              }
+            } else {
+              console.warn(`Failed to get associations for contact ${contact.id}: ${associationResponse.status}`);
+            }
+          } catch (contactError) {
+            console.warn(`Error checking contact ${contact.id}: ${contactError.message}`);
+          }
+          
+          if (hasBillingContacts) break;
+        }
+      }
+    } catch (searchError) {
+      console.warn(`Search API failed, trying alternative approach: ${searchError.message}`);
+      
+      // Alternative: Try using the basic API to get company and then its associations
+      try {
+        const companyResponse = await hubspotClient.crm.companies.basicApi.getById(
+          companyId, 
+          ['name'], 
+          ['contacts']
+        );
+        
+        if (companyResponse.associations && companyResponse.associations.contacts) {
+          console.log(`Found ${companyResponse.associations.contacts.results.length} associated contacts via company API`);
+          hasBillingContacts = companyResponse.associations.contacts.results.length > 0;
+        }
+      } catch (altError) {
+        console.warn(`Alternative approach also failed: ${altError.message}`);
+      }
+    }
+
+    // Update the company property regardless of whether billing contacts exist
+    const updateProperties = {
+      date_billing_contact_last_updated: currentTimestamp.toString()
+    };
+
+    await hubspotClient.crm.companies.basicApi.update(companyId, {
+      properties: updateProperties
+    });
+
+    console.log(`Updated company ${companyId} - Billing contacts found: ${hasBillingContacts}`);
+    console.log(`Timestamp updated: ${currentTimestamp}`);
+
+    callback({
+      outputFields: {
+        company_id: companyId,
+        billing_contacts_found: hasBillingContacts,
+        timestamp_updated: currentTimestamp,
+        status: 'success'
+      }
+    });
+
+  } catch (error) {
+    console.error('Error in custom coded action:', error);
+    console.error('Error stack:', error.stack);
+    
+    callback({
+      outputFields: {
+        status: 'error',
+        error_message: error.message,
+        error_details: error.stack
+      }
+    });
+  }
+};
+
+// Simplified version that just updates the timestamp when workflow runs
+// Use this if the association checking proves too complex
+exports.simpleMain = async (event, callback) => {
+  try {
+    const hubspotClient = new hubspot.Client({
+      accessToken: process.env.billing_contact
+    });
+
+    const companyId = event.inputFields['hs_object_id'] || event.object.objectId;
+    
+    if (!companyId) {
+      throw new Error('Company ID not found');
+    }
+
+    const currentTimestamp = Date.now();
+    
+    await hubspotClient.crm.companies.basicApi.update(companyId, {
+      properties: {
+        date_billing_contact_last_updated: currentTimestamp.toString()
+      }
+    });
+
+    callback({
+      outputFields: {
+        company_id: companyId,
+        timestamp_updated: currentTimestamp,
+        status: 'success'
+      }
+    });
+
+  } catch (error) {
+    console.error('Error:', error);
+    callback({
+      outputFields: {
+        status: 'error',
+        error_message: error.message
+      }
+    });
+  }
+};
